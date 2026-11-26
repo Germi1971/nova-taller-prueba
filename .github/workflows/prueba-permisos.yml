@@ -33,7 +33,8 @@ jobs:
           no "leer los webhooks (administración)" "gh api repos/$R/hooks"
           no "leer los secretos" "gh api repos/$R/actions/secrets"
           no "leer la configuración de Actions (administración)" "gh api repos/$R/actions/permissions"
-          no "leer los colaboradores con permisos" "gh api repos/$R/collaborators"
+          # Leer colaboradores es propio de Metadata: read (GitHub lo da siempre, no se puede sacar): se acepta como esperado (Germán, 26/11/2026).
+          si "leer los colaboradores (propio de Metadata: read, solo lectura)" "gh api repos/$R/collaborators"
           si "abrir un PR hacia la rama protegida" "gh pr create --base $P --head $RAMA --title 'Prueba de permisos (no fusionar)' --body 'Se cierra sola.'"
           no "fusionar sin la aprobación de Germán" "gh pr merge $RAMA --merge"
           no "aprobar su propio PR" "gh pr review $RAMA --approve"
