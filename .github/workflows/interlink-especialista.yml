@@ -67,6 +67,7 @@ jobs:
           anthropic_organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
           anthropic_federation_rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
           anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           claude_args: >-
             --max-turns 25 --model claude-sonnet-5-5
             --allowedTools "Read,Glob,Grep,Edit(src/**),Write(src/**),Edit(docs/**),Write(docs/**),Edit(README.md)"
