@@ -142,7 +142,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: { contents: read }
-    strategy: { matrix: { donde: [entrega, main] } }
+    strategy: { fail-fast: false, matrix: { donde: [entrega, main] } }
     steps:
       - uses: actions/checkout@v6
         with: { ref: "${{ matrix.donde == 'main' && github.sha || needs.publicar.outputs.sha }}", persist-credentials: false }
