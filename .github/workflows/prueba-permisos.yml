@@ -1,0 +1,42 @@
+# AUT-2 · PRUEBA DE PERMISOS del token con el que escribe Code (sin IA, sin costo). La dispara la app de NOVA con un encargo etiquetado «prueba-permisos».
+# Con los MISMOS permisos que usa Code intenta lo prohibido y lo permitido. Sale 0 solo si todo da lo esperado; limpia lo que crea. scripts/taller-acta.ts lee el resultado.
+name: Prueba de permisos
+on:
+  issues: { types: [opened] }
+permissions: { contents: read }
+jobs:
+  permisos:
+    if: github.actor == 'neolab-interlink[bot]' && contains(github.event.issue.labels.*.name, 'prueba-permisos')
+    name: "permisos de Code @ ${{ github.event.issue.number }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions: { contents: write, pull-requests: write, issues: write }
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - env: { GH_TOKEN: "${{ github.token }}", R: "${{ github.repository }}" }
+        run: |
+          set -u; mal=0; git config user.name prueba; git config user.email prueba@invalid
+          MAIN=$(git rev-parse origin/main); RAMA="prueba-permisos-$GITHUB_RUN_ID"
+          no() { if eval "$2" >/dev/null 2>&1; then echo "MAL PUDO $1"; mal=$((mal+1)); else echo "OK  no puede $1"; fi; }
+          si() { if eval "$2" >/dev/null 2>&1; then echo "OK  puede $1"; else echo "MAL no pudo $1"; mal=$((mal+1)); fi; }
+          echo x > prueba.txt; git add prueba.txt; git commit -qm prueba
+          no "empujar a main" "git push origin HEAD:main"
+          no "forzar main" "git push --force origin HEAD:main"
+          no "borrar main" "git push origin :main"
+          si "subir su rama" "git push origin HEAD:refs/heads/$RAMA"
+          mkdir -p .github/workflows && echo 'on: push' > .github/workflows/malo.yml && git add .github && git commit -qm flujo
+          no "subir un flujo (ni en su rama)" "git push origin HEAD:refs/heads/$RAMA"
+          no "escribir en main por la API" "gh api -X PUT repos/$R/contents/x.txt -f message=x -f content=eA== -f branch=main"
+          no "crear un webhook" "gh api -X POST repos/$R/hooks -f name=web -f 'config[url]=https://example.invalid'"
+          no "ver los secretos" "gh api repos/$R/actions/secrets"
+          no "crear reglas" "gh api -X POST repos/$R/rulesets -f name=x -f target=branch -f enforcement=disabled"
+          no "sacar la protección" "gh api -X DELETE repos/$R/branches/main/protection"
+          no "cambiar colaboradores" "gh api -X PUT repos/$R/collaborators/octocat"
+          git reset -q --hard HEAD~1
+          si "abrir un PR" "gh pr create --base main --head $RAMA --title 'Prueba de permisos (no fusionar)' --body 'Se cierra sola.'"
+          no "fusionar sin la aprobación de Germán" "gh pr merge $RAMA --merge"
+          no "aprobar su propio PR" "gh pr review $RAMA --approve"
+          gh pr close "$RAMA" >/dev/null 2>&1; git push -q origin ":refs/heads/$RAMA" 2>/dev/null
+          [ "$(git ls-remote origin refs/heads/main | cut -c1-40)" = "$MAIN" ] && echo "OK  main quedó igual" || { echo "MAL main cambió"; mal=$((mal+1)); }
+          echo; [ $mal = 0 ] && echo "Todo OK" || echo "$mal FALLAS"; exit $mal

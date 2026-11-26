@@ -1,0 +1,128 @@
+# AUT-2 · El taller. Claude Code trabaja en una máquina de GitHub, nunca en nuestros servidores.
+#
+# QUIÉN LO DISPARA: solo la app de NOVA (neolab-interlink[bot]), en un encargo suyo o en el PR del taller, con la etiqueta y la mención.
+#   Un issue o un comentario de cualquier otra persona o bot no corre nada (ni se cobra nada). Claude solo lee los comentarios de la app de NOVA.
+# ANTHROPIC: Workload Identity Federation (token temporal del workspace «nova-taller», con su tope mensual). Ninguna clave guardada.
+# GITHUB: Code escribe con el token de ESTA corrida (este repositorio, vence al terminar, sin permiso de flujos). Sin app propia.
+# SEPARACIÓN: el código que escribe Code NUNCA corre donde hay una credencial.
+#   - «desarrollar» tiene WIF y escritura, pero Code no puede ejecutar nada (solo lee y edita src/, docs/ y README.md) y lo que sigue usa solo la
+#     API de GitHub (sin git en la carpeta que Code tocó).
+#   - Las pruebas corren en trabajos aparte: solo lectura, sin WIF, sin token en el ambiente, sin secretos, sin guardar credenciales de git.
+# EVIDENCIA: como lo dispara un encargo, GitHub corre SIEMPRE la versión de main de este archivo (Code no puede cambiar su vara), y las pruebas van en
+#   la MISMA corrida (no hay una corrida nueva que GitHub deje esperando aprobación). Cada prueba lleva en su nombre el commit exacto que probó.
+name: INTERLINK especialista
+on:
+  issues: { types: [opened] }
+  issue_comment: { types: [created] }
+permissions: {}
+concurrency: { group: "taller", cancel-in-progress: false }
+jobs:
+  desarrollar:
+    if: >-
+      github.actor == 'neolab-interlink[bot]' &&
+      contains(github.event.issue.labels.*.name, 'nova-interlink') &&
+      (github.event.issue.user.login == 'neolab-interlink[bot]' || github.event.issue.user.login == 'github-actions[bot]') &&
+      contains(github.event.comment.body || github.event.issue.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions: { contents: write, pull-requests: write, issues: write, id-token: write }
+    outputs: { rama: "${{ steps.fin.outputs.rama }}", sha: "${{ steps.fin.outputs.sha }}" }
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        id: claude
+        with:
+          github_token: ${{ github.token }}
+          allowed_bots: "neolab-interlink[bot]"
+          include_comments_by_actor: "neolab-interlink[bot]"
+          anthropic_organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic_federation_rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          claude_args: >-
+            --max-turns 25 --model claude-sonnet-5-5
+            --allowedTools "Read,Glob,Grep,Edit(src/**),Write(src/**),Edit(docs/**),Write(docs/**),Edit(README.md)"
+            --disallowedTools "Bash,WebFetch,WebSearch,Edit(.git/**),Write(.git/**),Edit(.github/**),Write(.github/**),Edit(pruebas/**),Write(pruebas/**)"
+      - name: Commit y PR (solo la API de GitHub; nada de git en la carpeta que tocó Code)
+        id: fin
+        env: { GH_TOKEN: "${{ github.token }}", R: "${{ github.repository }}", RAMA0: "${{ steps.claude.outputs.branch_name }}", PRH: "${{ github.event.issue.pull_request && github.event.issue.number || '' }}" }
+        working-directory: ${{ runner.temp }}
+        run: |
+          RAMA="$RAMA0"; [ -n "$RAMA" ] || [ -z "$PRH" ] || RAMA=$(gh api "repos/$R/pulls/$PRH" --jq .head.ref)
+          printf '%s' "$RAMA" | grep -Eq '^claude/issue-[0-9]{1,9}-[A-Za-z0-9._-]+$' || { echo "Sin rama de entrega."; exit 0; }
+          SHA=$(gh api "repos/$R/git/ref/heads/$RAMA" --jq .object.sha) || exit 0
+          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || exit 0
+          echo "rama=$RAMA" >> "$GITHUB_OUTPUT"; echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          N=$(printf '%s' "$RAMA" | sed -E 's#^claude/issue-([0-9]+)-.*#\1#')
+          [ "$(gh api "repos/$R/pulls?head=${R%%/*}:$RAMA&state=open" --jq length)" = 0 ] || exit 0
+          gh pr create --repo "$R" --base main --head "$RAMA" --label nova-interlink --title "Encargo #$N" --body "Entrega del encargo #$N. La verifica NOVA con las pruebas de main; no fusionar sin la revisión de Germán."
+  leer-casos:
+    # Lee los casos propios del encargo (si los hay). Solo lectura de issues; acá no corre código de nadie.
+    needs: desarrollar
+    if: needs.desarrollar.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: { issues: read }
+    outputs: { encargo: "${{ steps.e.outputs.encargo }}" }
+    steps:
+      - id: e
+        env: { GH_TOKEN: "${{ github.token }}", R: "${{ github.repository }}", RAMA: "${{ needs.desarrollar.outputs.rama }}" }
+        run: |
+          N=$(printf '%s' "$RAMA" | sed -nE 's#^claude/issue-([0-9]{1,9})-[A-Za-z0-9._-]+$#\1#p'); [ -n "$N" ] || exit 1
+          J=$(gh api "repos/$R/issues/$N" --jq 'if .user.login == "neolab-interlink[bot]" and ([.labels[].name] | index("nova-interlink")) then .body else "" end' | base64 -w0)
+          echo "encargo=$J" >> "$GITHUB_OUTPUT"
+  prueba:
+    needs: desarrollar
+    if: needs.desarrollar.outputs.sha != ''
+    name: "verificador pruebas/importe-prueba.mjs @ ${{ needs.desarrollar.outputs.sha }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: "${{ needs.desarrollar.outputs.sha }}", fetch-depth: 0, persist-credentials: false }
+      - name: La prueba es la de main
+        run: git checkout "${{ github.sha }}" -- pruebas/
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node pruebas/importe-prueba.mjs
+  prueba-main:
+    needs: desarrollar
+    if: needs.desarrollar.outputs.sha != ''
+    name: "en main pruebas/importe-prueba.mjs @ ${{ needs.desarrollar.outputs.sha }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v6
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node pruebas/importe-prueba.mjs
+  casos:
+    needs: [desarrollar, leer-casos]
+    if: needs.desarrollar.outputs.sha != ''
+    name: "verificador casos-del-encargo (${{ matrix.donde }}) @ ${{ needs.desarrollar.outputs.sha }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    strategy: { matrix: { donde: [entrega, main] } }
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: "${{ matrix.donde == 'main' && github.sha || needs.desarrollar.outputs.sha }}", persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Casos del encargo (sin ningún token en el ambiente)
+        env: { ENCARGO: "${{ needs.leer-casos.outputs.encargo }}" }
+        run: |
+          node --input-type=module -e '
+            import path from "node:path";
+            const b = Buffer.from(process.env.ENCARGO ?? "", "base64").toString("utf8");
+            if (!b) { console.log("El encargo no es de la app de NOVA: no lo uso."); process.exit(1); }
+            const k = b.indexOf("## Casos de aceptación del encargo"); if (k < 0) { console.log("Sin casos propios."); process.exit(0); }
+            const f = /\(([\w./-]+)#(\w+);/.exec(b.slice(k, b.indexOf("\n", k)));
+            if (!f || f[1].startsWith("/") || f[1].includes("..")) { console.log("No entiendo qué función prueban."); process.exit(1); }
+            const casos = []; for (const l of b.slice(k).split("\n").slice(1)) { if (/^## /.test(l)) break; const m = /^- (".*?(?<!\\)") → (.+)$/.exec(l); if (m) casos.push([JSON.parse(m[1]), JSON.parse(m[2])]); }
+            const fn = (await import(path.resolve(f[1])))[f[2]]; let mal = 0;
+            for (const [e, x] of casos) { let y; try { y = fn(e); } catch (z) { y = `error: ${z.message}`; } if (JSON.stringify(y) !== JSON.stringify(x)) { mal++; console.log("FALLA", JSON.stringify(e), "dio", JSON.stringify(y), "y tenía que dar", JSON.stringify(x)); } }
+            console.log(`${casos.length - mal} de ${casos.length} casos bien`); process.exit(mal ? 1 : 0);'
