@@ -11,6 +11,7 @@
 # EVIDENCIA: como lo dispara un encargo, GitHub corre siempre la versión de main de este archivo, en una sola corrida (nada queda esperando
 #   aprobación), y cada prueba lleva en su nombre el commit exacto que probó.
 name: INTERLINK especialista
+run-name: "INTERLINK #${{ github.event.issue.number }} · ${{ github.event.issue.title }}"
 on:
   issues: { types: [opened] }
   issue_comment: { types: [created] }
