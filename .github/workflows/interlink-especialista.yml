@@ -1,0 +1,161 @@
+# AUT-2 · El taller. Claude Code trabaja en una máquina de GitHub, nunca en nuestros servidores.
+#
+# QUIÉN LO DISPARA: solo la app de NOVA (neolab-interlink[bot]), en un encargo suyo o en el PR del taller, con la etiqueta y la mención.
+#   Un issue o un comentario de cualquier otra persona o bot no corre nada ni cuesta nada. A Claude le llega SOLO el texto de NOVA.
+# CUATRO PASOS, CADA UNO CON LO MÍNIMO:
+#   preparar  · lee el encargo (solo lectura de issues). No baja ni corre código.
+#   programar · Claude Code. Solo la credencial temporal de Anthropic (WIF); de GitHub, solo lectura de un repositorio público. No puede ejecutar
+#               nada, ni leer .git ni /proc, ni escribir fuera de src/, docs/ y README.md. Lo único que sale es un parche.
+#   publicar  · revisa el parche (rutas, tamaño, claves) y lo sube a la rama del encargo; abre el PR. Tiene escritura, pero NUNCA ejecuta código.
+#   pruebas   · corren el código de la entrega en trabajos aparte: solo lectura, sin WIF, sin tokens en el ambiente, sin credenciales de git.
+# EVIDENCIA: como lo dispara un encargo, GitHub corre siempre la versión de main de este archivo, en una sola corrida (nada queda esperando
+#   aprobación), y cada prueba lleva en su nombre el commit exacto que probó.
+name: INTERLINK especialista
+on:
+  issues: { types: [opened] }
+  issue_comment: { types: [created] }
+permissions: {}
+concurrency: { group: "taller", cancel-in-progress: false }
+jobs:
+  preparar:
+    if: >-
+      github.actor == 'neolab-interlink[bot]' &&
+      contains(github.event.issue.labels.*.name, 'nova-interlink') &&
+      (github.event.issue.user.login == 'neolab-interlink[bot]' || github.event.issue.user.login == 'github-actions[bot]') &&
+      contains(github.event.comment.body || github.event.issue.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: { issues: read, pull-requests: read }
+    outputs: { rama: "${{ steps.p.outputs.rama }}", desde: "${{ steps.p.outputs.desde }}", pedido: "${{ steps.p.outputs.pedido }}", encargo: "${{ steps.p.outputs.encargo }}" }
+    steps:
+      - id: p
+        working-directory: ${{ runner.temp }}
+        env: { GH_TOKEN: "${{ github.token }}", R: "${{ github.repository }}", N0: "${{ github.event.issue.number }}", ESPR: "${{ github.event.issue.pull_request && 'si' || '' }}", COMENTARIO: "${{ github.event.comment.body }}" }
+        run: |
+          if [ -n "$ESPR" ]; then
+            RAMA=$(gh api "repos/$R/pulls/$N0" --jq .head.ref); DESDE=$(gh api "repos/$R/pulls/$N0" --jq .head.sha)
+          else
+            RAMA="claude/issue-$N0-$GITHUB_RUN_ID"; DESDE="$GITHUB_SHA"
+          fi
+          printf '%s' "$RAMA" | grep -Eq '^claude/issue-[0-9]{1,9}-[A-Za-z0-9._-]+$' || { echo "Rama inválida."; exit 1; }
+          N=$(printf '%s' "$RAMA" | sed -E 's#^claude/issue-([0-9]+)-.*#\1#')
+          gh api "repos/$R/issues/$N" --jq 'if .user.login == "neolab-interlink[bot]" and ([.labels[].name] | index("nova-interlink")) then .body else "" end' > encargo.md
+          [ -s encargo.md ] || { echo "El encargo no es de la app de NOVA."; exit 1; }
+          { echo "Sos el especialista de un proyecto de práctica. Trabajá SOLO en src/, docs/ y README.md; no toques pruebas/ ni .github/."
+            echo "Hacé el cambio editando los archivos y terminá. No hagas commit ni push: lo publica el sistema."
+            echo; echo "=== ENCARGO (de NOVA) ==="; cat encargo.md
+            if [ -n "$ESPR" ]; then echo; echo "=== CORRECCIÓN PEDIDA POR NOVA ==="; printf '%s\n' "$COMENTARIO"; fi
+          } > pedido.md
+          echo "rama=$RAMA" >> "$GITHUB_OUTPUT"; echo "desde=$DESDE" >> "$GITHUB_OUTPUT"
+          echo "pedido=$(base64 -w0 pedido.md)" >> "$GITHUB_OUTPUT"; echo "encargo=$(base64 -w0 encargo.md)" >> "$GITHUB_OUTPUT"
+  programar:
+    needs: preparar
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: "${{ needs.preparar.outputs.desde }}", persist-credentials: false }
+      - id: pedido
+        env: { P: "${{ needs.preparar.outputs.pedido }}" }
+        run: |
+          { echo 'texto<<FIN_PEDIDO'; printf '%s' "$P" | base64 -d | grep -v '^FIN_PEDIDO$'; echo; echo 'FIN_PEDIDO'; } >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: ${{ steps.pedido.outputs.texto }}
+          github_token: ${{ github.token }}
+          anthropic_organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          anthropic_federation_rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          claude_args: >-
+            --max-turns 25 --model claude-sonnet-5-5
+            --allowedTools "Read,Glob,Grep,Edit(src/**),Write(src/**),Edit(docs/**),Write(docs/**),Edit(README.md)"
+            --disallowedTools "Bash,WebFetch,WebSearch,Read(.git/**),Read(//proc/**),Read(//home/runner/work/_temp/**),Read(//tmp/**),Read(//etc/**),Read(//home/runner/.claude/**),Read(//home/runner/.config/**),Edit(.git/**),Write(.git/**),Edit(.github/**),Write(.github/**),Edit(pruebas/**),Write(pruebas/**)"
+      - name: El parche (sin ejecutar nada del repositorio)
+        run: |
+          git -c core.hooksPath=/dev/null -c core.fsmonitor=false add -A -- src docs README.md
+          git -c core.hooksPath=/dev/null -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --binary > "$RUNNER_TEMP/entrega.patch"
+      - uses: actions/upload-artifact@v4
+        with: { name: entrega, path: "${{ runner.temp }}/entrega.patch", retention-days: 3 }
+  publicar:
+    needs: [preparar, programar]
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions: { contents: write, pull-requests: write, issues: write }
+    outputs: { sha: "${{ steps.s.outputs.sha }}" }
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: "${{ needs.preparar.outputs.desde }}", fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { name: entrega, path: "${{ runner.temp }}/entrega" }
+      - name: Revisar el parche (no se ejecuta nada de él)
+        env: { F: "${{ runner.temp }}/entrega/entrega.patch" }
+        run: |
+          [ -s "$F" ] || { echo "Code no cambió nada."; exit 1; }
+          [ "$(wc -c < "$F")" -le 200000 ] || { echo "Parche demasiado grande."; exit 1; }
+          if grep -E '^(diff --git|rename (from|to)|copy (from|to)) ' "$F" | grep -vE '^diff --git a/(src/[A-Za-z0-9._/-]+|docs/[A-Za-z0-9._/-]+|README\.md) b/(src/[A-Za-z0-9._/-]+|docs/[A-Za-z0-9._/-]+|README\.md)$'; then echo "El parche toca algo fuera de src/, docs/ o README.md."; exit 1; fi
+          if grep -qE '^(new|old|deleted) (file )?mode 120000|^GIT binary patch|^Binary files' "$F"; then echo "El parche trae enlaces o binarios."; exit 1; fi
+          if grep -qE 'sk-ant-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' "$F"; then echo "El parche parece traer una credencial."; exit 1; fi
+          git apply --check "$F"
+      - id: s
+        env: { GH_TOKEN: "${{ github.token }}", R: "${{ github.repository }}", RAMA: "${{ needs.preparar.outputs.rama }}", F: "${{ runner.temp }}/entrega/entrega.patch" }
+        run: |
+          git -c core.hooksPath=/dev/null apply "$F"
+          git -c core.hooksPath=/dev/null add -A -- src docs README.md
+          git -c core.hooksPath=/dev/null -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "Entrega de Claude Code (encargo de NOVA)"
+          git -c core.hooksPath=/dev/null push -q origin "HEAD:refs/heads/$RAMA"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          N=$(printf '%s' "$RAMA" | sed -E 's#^claude/issue-([0-9]+)-.*#\1#')
+          [ "$(gh api "repos/$R/pulls?head=${R%%/*}:$RAMA&state=open" --jq length)" = 0 ] || exit 0
+          gh pr create --repo "$R" --base main --head "$RAMA" --label nova-interlink --title "Encargo #$N" --body "Entrega del encargo #$N. La verifica NOVA con las pruebas de main; no fusionar sin la revisión de Germán."
+  prueba:
+    needs: publicar
+    name: "verificador pruebas/importe-prueba.mjs @ ${{ needs.publicar.outputs.sha }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: "${{ needs.publicar.outputs.sha }}", fetch-depth: 0, persist-credentials: false }
+      - name: La prueba es la de main
+        run: git -c core.hooksPath=/dev/null checkout "${{ github.sha }}" -- pruebas/
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node pruebas/importe-prueba.mjs
+  prueba-main:
+    needs: publicar
+    name: "en main pruebas/importe-prueba.mjs @ ${{ needs.publicar.outputs.sha }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v6
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node pruebas/importe-prueba.mjs
+  casos:
+    needs: [preparar, publicar]
+    name: "verificador casos-del-encargo (${{ matrix.donde }}) @ ${{ needs.publicar.outputs.sha }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    strategy: { matrix: { donde: [entrega, main] } }
+    steps:
+      - uses: actions/checkout@v6
+        with: { ref: "${{ matrix.donde == 'main' && github.sha || needs.publicar.outputs.sha }}", persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Casos del encargo (sin ningún token en el ambiente)
+        env: { ENCARGO: "${{ needs.preparar.outputs.encargo }}" }
+        run: |
+          node --input-type=module -e '
+            import path from "node:path";
+            const b = Buffer.from(process.env.ENCARGO ?? "", "base64").toString("utf8");
+            const k = b.indexOf("## Casos de aceptación del encargo"); if (k < 0) { console.log("Sin casos propios."); process.exit(0); }
+            const f = /\(([\w./-]+)#(\w+);/.exec(b.slice(k, b.indexOf("\n", k)));
+            if (!f || f[1].startsWith("/") || f[1].includes("..")) { console.log("No entiendo qué función prueban."); process.exit(1); }
+            const casos = []; for (const l of b.slice(k).split("\n").slice(1)) { if (/^## /.test(l)) break; const m = /^- (".*?(?<!\\)") → (.+)$/.exec(l); if (m) casos.push([JSON.parse(m[1]), JSON.parse(m[2])]); }
+            const fn = (await import(path.resolve(f[1])))[f[2]]; let mal = 0;
+            for (const [e, x] of casos) { let y; try { y = fn(e); } catch (z) { y = `error: ${z.message}`; } if (JSON.stringify(y) !== JSON.stringify(x)) { mal++; console.log("FALLA", JSON.stringify(e), "dio", JSON.stringify(y), "y tenía que dar", JSON.stringify(x)); } }
+            console.log(`${casos.length - mal} de ${casos.length} casos bien`); process.exit(mal ? 1 : 0);'
